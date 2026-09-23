@@ -1,14 +1,18 @@
 import asyncio
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
 )
 
 # ==================== CONFIGURATION ====================
-BOT_TOKEN = 8624499142:AAEQF1q96dzUKBNnHcqQiKp8Lbp2IL7nCVU # এখানে BotFather থেকে পাওয়া টোকেন দিন
+BOT_TOKEN = "8624499142:AAFQ1hElEKGZUj9bEn1sZ6qYpiwvTqV6z_A"
 
 SMS_BOWER_API_KEY = "TJkdrZAI28TInbzhJEMYkXGc1n2FJqBt"
 SMS_OTPS_API_KEY = (
@@ -16,6 +20,21 @@ SMS_OTPS_API_KEY = (
 )
 
 user_provider = {}
+
+
+# Render Web Service-এর পোর্ট এরর ঠেকানোর জন্য ডামি সার্ভার
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    server.serve_forever()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,6 +196,8 @@ async def update_timer(context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))

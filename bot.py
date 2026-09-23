@@ -1,382 +1,203 @@
-import asyncio
 import os
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import requests
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-)
+import asyncio
+import aiohttp
+from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-# ==================== CONFIGURATION ====================
-BOT_TOKEN = "8624499142:AAFQ1hElEKGZUj9bEn1sZ6qYpiwvTqV6z_A"
+load_dotenv()
 
-SMS_BOWER_API_KEY = "TJkdrZAI28TInbzhJEMYkXGc1n2FJqBt"
-SMS_OTPS_API_KEY = (
-    "GtwfBfbN04sr2cYJlFaMCwzOlQFtbq0Fef1uOpr40r8g6VYiJhPkhT5X4JJI"
-)
+BOT_TOKEN = os.8624499142:AAFLy_phYwIuF7t-HcrgphwW81ceCuKf2dg
+API_KEY = os.sk_e8b858343e0101783c57b73d4e687d2b7fc7566314eec3d01738aac02378eb42
+BASE_URL = os.
+[http://203.161.58.20:3001/api/functions/agent-api](http://203.161.58.20:3001/api/functions/agent-api)
+    "PANEL_API_URL",
+    "http://203.161.58.20:3001/api/functions/agent-api"
+).rstrip("/")
 
-SMS_BOWER_URL = "https://smsbower.com/stubs/handler_api.php"
-SMS_OTPS_URL = "https://smsotps.com/stubs/handler_api.php"
+if not BOT_TOKEN or not API_KEY:
+    raise RuntimeError("Set BOT_TOKEN and PANEL_API_KEY in .env")
 
-# Requested Specific Countries (Name, Code, Dial Code, Flag)
-TARGET_COUNTRIES = {
-    "Colombia": {"code": "33", "dial": "+57", "flag": "🇨🇴"},
-    "Chile": {"code": "151", "dial": "+56", "flag": "🇨🇱"},
-    "Argentina": {"code": "39", "dial": "+54", "flag": "🇦🇷"},
-    "Tajikistan": {"code": "143", "dial": "+992", "flag": "🇹🇯"},
-    "Algeria": {"code": "58", "dial": "+213", "flag": "🇩🇿"},
-}
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
 
-user_provider = {}
-active_orders = {}
+class PanelAPI:
+    def __init__(self, base_url, api_key):
+        self.base_url = base_url
+        self.headers = {"x-api-key": api_key}
 
+    async def get(self, path, params=None):
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                self.base_url + path,
+                headers=self.headers,
+                params=params or {}
+            ) as r:
+                text = await r.text()
+                if r.status >= 400:
+                    raise RuntimeError(f"API {r.status}: {text[:500]}")
+                try:
+                    return json.loads(text)
+                except Exception:
+                    return {"raw": text}
 
-# Render Dummy Server
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    async def numbers(self, page=1, limit=20, status="assigned"):
+        return await self.get("/numbers", {
+            "page": page, "limit": limit, "status": status
+        })
 
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot Active")
+    async def otp(self, number=None, platform=None, since=None):
+        params = {}
+        if number: params["number"] = number
+        if platform: params["platform"] = platform
+        if since: params["since"] = since
+        return await self.get("/otp", params)
 
+    async def stats(self):
+        return await self.get("/stats")
 
-def run_dummy_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
-    server.serve_forever()
+    async def balance(self):
+        return await self.get("/balance")
 
+api = PanelAPI(BASE_URL, API_KEY)
 
-def get_api_info(user_id):
-    provider = user_provider.get(user_id, "SMS Bower")
-    if provider == "SMS Bower":
-        return SMS_BOWER_URL, SMS_BOWER_API_KEY, "SMS Bower"
-    return SMS_OTPS_URL, SMS_OTPS_API_KEY, "SMS OTPs"
+def main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Get Number", callback_data="numbers"),
+         InlineKeyboardButton(text="🔎 Search Number", callback_data="search")],
+        [InlineKeyboardButton(text="📊 Live Traffic", callback_data="stats"),
+         InlineKeyboardButton(text="💰 Balance", callback_data="balance")],
+        [InlineKeyboardButton(text="📨 SMS Status", callback_data="sms"),
+         InlineKeyboardButton(text="ℹ️ Help", callback_data="help")]
+    ])
 
+def pretty_numbers(payload):
+    data = payload.get("data", [])
+    if not data:
+        return "📱 No numbers were returned by the panel."
 
-def get_balance(url, api_key):
-    try:
-        res = requests.get(
-            f"{url}?api_key={api_key}&action=getBalance", timeout=5
-        ).text
-        if "ACCESS_BALANCE" in res:
-            return res.split(":")[1]
-        return "0.00"
-    except Exception:
-        return "0.00"
+    lines = ["📱 <b>Available Numbers</b>", ""]
+    for i, item in enumerate(data[:20], 1):
+        if isinstance(item, dict):
+            number = item.get("number") or item.get("phone") or item.get("msisdn") or "Unknown"
+            country = item.get("country") or item.get("country_name") or ""
+            platform = item.get("platform") or item.get("service") or ""
+            status = item.get("status") or ""
+            extra = " • ".join(x for x in [country, platform, status] if x)
+            lines.append(f"{i}. <code>{number}</code>" + (f" — {extra}" if extra else ""))
+        else:
+            lines.append(f"{i}. <code>{item}</code>")
+    return "\n".join(lines)
 
+def pretty_stats(payload):
+    d = payload.get("data", payload)
+    if isinstance(d, list):
+        d = d[0] if d else {}
+    if not isinstance(d, dict):
+        return f"📊 <b>Stats</b>\n<code>{str(d)[:1500]}</code>"
 
-def get_country_price(url, api_key, country_code):
-    try:
-        res = requests.get(
-            f"{url}?api_key={api_key}&action=getPrices&service=tg&country={country_code}",
-            timeout=5,
-        ).json()
-        if country_code in res and "tg" in res[country_code]:
-            prices = list(res[country_code]["tg"].keys())
-            if prices:
-                return f"${prices[0]}"
-    except Exception:
-        pass
-    return "$0.02"
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-
-    if user_id not in user_provider:
-        user_provider[user_id] = "SMS Bower"
-
-    url, api_key, provider = get_api_info(user_id)
-    balance = get_balance(url, api_key)
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📱 Get Number", callback_data="show_services"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📊 Live Traffic", callback_data="check_balance"
-            ),
-            InlineKeyboardButton(
-                "💳 Balance", callback_data="check_balance"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "⚙️ Switch Provider", callback_data="switch_provider"
-            )
-        ],
+    lines = ["📊 <b>Panel Statistics</b>", ""]
+    labels = [
+        ("total_sms", "Total SMS"),
+        ("today_sms", "Today SMS"),
+        ("balance", "Balance"),
+        ("numbers", "Numbers"),
+        ("users", "Users"),
     ]
+    for key, label in labels:
+        if key in d:
+            lines.append(f"• {label}: <b>{d[key]}</b>")
+    if len(lines) == 2:
+        lines.append(f"<code>{json.dumps(d, ensure_ascii=False, indent=2)[:2500]}</code>")
+    return "\n".join(lines)
 
-    welcome_text = (
-        f"🔥 **AR TEAM / SMSly Bot-e Swagotom!**\n\n"
-        f"Ekhane kaj kore khub sohojei Verification OTP nite parben.\n"
-        f"💰 **Current Balance:** `{balance} RUB`\n"
-        f"🌐 **Current Provider:** `{provider}`\n\n"
-        f"👉 Shuru koralar jonno **Get Number** button-e click korun!"
+@dp.message(CommandStart())
+async def start(message: Message):
+    text = (
+        "🤖 <b>SMS Panel Bot</b>\n\n"
+        "Welcome! This bot is connected to your authorized SMS panel API.\n\n"
+        "Choose an option below:"
+    )
+    await message.answer(text, reply_markup=main_keyboard(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "numbers")
+async def cb_numbers(call: CallbackQuery):
+    await call.answer()
+    try:
+        payload = await api.numbers()
+        await call.message.answer(pretty_numbers(payload), parse_mode="HTML",
+                                  reply_markup=main_keyboard())
+    except Exception as e:
+        await call.message.answer(f"❌ API error:\n<code>{str(e)[:1000]}</code>",
+                                  parse_mode="HTML")
+
+@dp.callback_query(F.data == "stats")
+async def cb_stats(call: CallbackQuery):
+    await call.answer()
+    try:
+        payload = await api.stats()
+        await call.message.answer(pretty_stats(payload), parse_mode="HTML",
+                                  reply_markup=main_keyboard())
+    except Exception as e:
+        await call.message.answer(f"❌ API error:\n<code>{str(e)[:1000]}</code>",
+                                  parse_mode="HTML")
+
+@dp.callback_query(F.data == "balance")
+async def cb_balance(call: CallbackQuery):
+    await call.answer()
+    try:
+        payload = await api.balance()
+        await call.message.answer(
+            "💰 <b>Balance</b>\n\n<code>" +
+            json.dumps(payload, ensure_ascii=False, indent=2)[:2500] +
+            "</code>",
+            parse_mode="HTML", reply_markup=main_keyboard()
+        )
+    except Exception as e:
+        await call.message.answer(f"❌ API error:\n<code>{str(e)[:1000]}</code>",
+                                  parse_mode="HTML")
+
+@dp.callback_query(F.data == "sms")
+async def cb_sms(call: CallbackQuery):
+    await call.answer()
+    try:
+        payload = await api.otp()
+        await call.message.answer(
+            "📨 <b>SMS Status</b>\n\n<code>" +
+            json.dumps(payload, ensure_ascii=False, indent=2)[:3000] +
+            "</code>",
+            parse_mode="HTML", reply_markup=main_keyboard()
+        )
+    except Exception as e:
+        await call.message.answer(f"❌ API error:\n<code>{str(e)[:1000]}</code>",
+                                  parse_mode="HTML")
+
+@dp.callback_query(F.data == "search")
+async def cb_search(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer(
+        "🔎 Send a number or keyword to search.\n"
+        "Search filtering depends on the fields supported by your panel API.",
+        reply_markup=main_keyboard()
     )
 
-    if update.message:
-        await update.message.reply_text(
-            welcome_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-    else:
-        await update.callback_query.message.edit_text(
-            welcome_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
+@dp.callback_query(F.data == "help")
+async def cb_help(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer(
+        "ℹ️ <b>Help</b>\n\n"
+        "📱 Get Number — reads assigned numbers from your panel\n"
+        "📊 Live Traffic — reads current panel statistics\n"
+        "💰 Balance — reads your panel balance\n"
+        "📨 SMS Status — reads SMS/OTP records exposed by your API\n\n"
+        "Only use the API with numbers/services you are authorized to manage.",
+        parse_mode="HTML", reply_markup=main_keyboard()
+    )
 
-
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
-
-    url, api_key, provider = get_api_info(user_id)
-
-    if data == "main_menu":
-        await start(update, context)
-
-    elif data == "check_balance":
-        balance = get_balance(url, api_key)
-        await query.answer(
-            f"💰 {provider} Balance: {balance} RUB", show_alert=True
-        )
-
-    elif data == "switch_provider":
-        p_kb = [
-            [
-                InlineKeyboardButton(
-                    "🔹 SMS Bower", callback_data="set_bower"
-                ),
-                InlineKeyboardButton("🔸 SMS OTPs", callback_data="set_otps"),
-            ],
-            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
-        ]
-        await query.message.edit_text(
-            "Select API Provider:", reply_markup=InlineKeyboardMarkup(p_kb)
-        )
-
-    elif data == "set_bower":
-        user_provider[user_id] = "SMS Bower"
-        await start(update, context)
-
-    elif data == "set_otps":
-        user_provider[user_id] = "SMS OTPs"
-        await start(update, context)
-
-    elif data == "show_services":
-        s_kb = [
-            [
-                InlineKeyboardButton(
-                    "✈️ Telegram", callback_data="select_country"
-                )
-            ],
-            [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
-        ]
-        await query.message.edit_text(
-            "Select a service below:", reply_markup=InlineKeyboardMarkup(s_kb)
-        )
-
-    elif data == "select_country":
-        buttons = []
-        for c_name, c_info in TARGET_COUNTRIES.items():
-            price = get_country_price(url, api_key, c_info["code"])
-            btn_text = (
-                f"{c_info['flag']} {c_name} ({c_info['dial']}) | {price}/OTP"
-            )
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        btn_text, callback_data=f"buy_{c_info['code']}_{c_name}"
-                    )
-                ]
-            )
-
-        buttons.append(
-            [InlineKeyboardButton("🔙 Back", callback_data="show_services")]
-        )
-        await query.message.edit_text(
-            "**Available countries:**",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="Markdown",
-        )
-
-    elif data.startswith("buy_"):
-        _, country_code, country_name = data.split("_", 2)
-        c_info = TARGET_COUNTRIES[country_name]
-
-        await query.message.edit_text(
-            f"⏳ Requesting number for **{country_name}**..."
-        )
-
-        try:
-            req_url = f"{url}?api_key={api_key}&action=getNumber&service=tg&country={country_code}"
-            res = requests.get(req_url, timeout=10).text
-
-            if "ACCESS_NUMBER" in res:
-                parts = res.split(":")
-                tz_id = parts[1]
-                number = parts[2]
-
-                active_orders[user_id] = {
-                    "id": tz_id,
-                    "number": number,
-                    "provider": provider,
-                    "url": url,
-                    "api_key": api_key,
-                    "country": country_name,
-                    "flag": c_info["flag"],
-                    "dial": c_info["dial"],
-                    "start_time": asyncio.get_event_loop().time(),
-                }
-
-                action_kb = [
-                    [
-                        InlineKeyboardButton(
-                            f"✈️ {c_info['flag']} +{number}",
-                            callback_data="copy_num",
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "🔄 Change Country", callback_data="select_country"
-                        ),
-                        InlineKeyboardButton(
-                            "🔄 Change Number",
-                            callback_data=f"buy_{country_code}_{country_name}",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "❌ Cancel", callback_data="cancel_order"
-                        )
-                    ],
-                ]
-
-                msg = await query.message.reply_text(
-                    f"🔄 These numbers are activated and ready to receive SMS.\n\n"
-                    f"🔹 **Service:** Telegram\n"
-                    f"🌐 **Country:** {c_info['flag']} {country_name} ({c_info['dial']})\n"
-                    f"📞 **Number:** `+{number}`\n\n"
-                    f"⏳ Waiting for OTP...",
-                    reply_markup=InlineKeyboardMarkup(action_kb),
-                    parse_mode="Markdown",
-                )
-
-                context.job_queue.run_repeating(
-                    check_sms_status,
-                    interval=5,
-                    first=1,
-                    data={
-                        "msg_id": msg.message_id,
-                        "chat_id": query.message.chat_id,
-                        "user_id": user_id,
-                    },
-                    name=str(user_id),
-                )
-            else:
-                await query.message.edit_text(
-                    f"❌ No number available for {country_name} right now.\nReason: `{res}`",
-                    reply_markup=InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    "🔙 Try Again",
-                                    callback_data="select_country",
-                                )
-                            ]
-                        ]
-                    ),
-                    parse_mode="Markdown",
-                )
-        except Exception as e:
-            await query.message.edit_text(f"❌ Connection Error: {e}")
-
-    elif data == "cancel_order":
-        order = active_orders.get(user_id)
-        if not order:
-            await query.message.edit_text("❌ No active order found.")
-            return
-
-        elapsed = asyncio.get_event_loop().time() - order["start_time"]
-
-        # 2 Minute rule for SMS OTPs
-        if order["provider"] == "SMS OTPs" and elapsed < 120:
-            rem = int(120 - elapsed)
-            await query.answer(
-                f"⚠️ Please wait {rem} seconds more before canceling on SMS OTPs (2-min rule)!",
-                show_alert=True,
-            )
-            return
-
-        try:
-            cancel_url = f"{order['url']}?api_key={order['api_key']}&action=setStatus&status=8&id={order['id']}"
-            requests.get(cancel_url, timeout=5)
-        except Exception:
-            pass
-
-        jobs = context.job_queue.get_jobs_by_name(str(user_id))
-        for j in jobs:
-            j.schedule_removal()
-
-        del active_orders[user_id]
-        await query.message.edit_text(
-            "❌ **Number activation successfully canceled.**"
-        )
-
-
-async def check_sms_status(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    user_id = job.data["user_id"]
-    order = active_orders.get(user_id)
-
-    if not order:
-        job.schedule_removal()
-        return
-
-    try:
-        check_url = f"{order['url']}?api_key={order['api_key']}&action=getStatus&id={order['id']}"
-        res = requests.get(check_url, timeout=5).text
-
-        if "STATUS_OK" in res:
-            code = res.split(":")[1]
-            job.schedule_removal()
-            del active_orders[user_id]
-
-            await context.bot.send_message(
-                chat_id=job.data["chat_id"],
-                text=f"🎉 **OTP Received!**\n\n"
-                f"📞 **Number:** `+{order['number']}`\n"
-                f"🔑 **Code:** `{code}`",
-                parse_mode="Markdown",
-            )
-            return
-    except Exception:
-        pass
-
-
-def main():
-    threading.Thread(target=run_dummy_server, daemon=True).start()
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_click))
-
-    print("SMSly Bot Style System Active...")
-    app.run_polling()
-
+async def main():
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
